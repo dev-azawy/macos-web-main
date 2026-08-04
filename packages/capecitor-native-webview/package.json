@@ -1,0 +1,20 @@
+{
+  "name": "capacitor-native-webview",
+  "version": "1.0.0",
+  "description": "Local Capacitor plugin: renders a real native WKWebView docked to a Svelte window's on-screen frame, so Safari/Chrome/Google/GitHub/YouTube windows behave like real in-app windows (draggable, resizable) instead of leaving the app.",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "files": [
+    "src/",
+    "ios/",
+    "NativeWebview.podspec"
+  ],
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    }
+  },
+  "peerDependencies": {
+    "@capacitor/core": "^7.0.0"
+  }
+}
