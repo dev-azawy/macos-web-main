@@ -1,0 +1,81 @@
+name: Build Unsigned IPA
+
+# Produces an UNSIGNED .ipa. This will NOT install by tapping it or via Xcode --
+# it has no valid Apple code signature. It's meant to be re-signed at install time
+# by a sideloading tool (AltStore, Sideloadly, etc.) using your own free Apple ID,
+# or used as the input to your own signing step if you have a paid Developer account.
+#
+# If you have a paid Apple Developer Program membership and want a normally
+# installable IPA (TestFlight, ad-hoc, etc.), use `ios-signed-release.yml` instead.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: Install web deps (includes the local native-webview plugin)
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build web app
+        run: pnpm run build
+
+      - name: Add iOS platform
+        run: |
+          rm -rf ios
+          npx cap add ios --packagemanager CocoaPods
+
+      - name: Sync web assets + native plugins (Safari/Chrome/Google/GitHub/YouTube windows)
+        run: npx cap sync ios
+
+      - name: Set iOS deployment target
+        run: |
+          sed -i '' "s/platform :ios.*/platform :ios, '14.0'/" ios/App/Podfile
+
+      - name: Install CocoaPods
+        run: |
+          cd ios/App
+          pod install --repo-update
+
+      - name: Archive (unsigned)
+        run: |
+          cd ios/App
+          xcodebuild -workspace App.xcworkspace \
+            -scheme App \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath $PWD/build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=14.0 \
+            archive
+
+      - name: Package IPA
+        run: |
+          cd ios/App/build
+          mkdir Payload
+          cp -r App.xcarchive/Products/Applications/*.app Payload/
+          zip -r MacOSWeb-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacOSWeb-unsigned-ipa
+          path: ios/App/build/MacOSWeb-unsigned.ipa
