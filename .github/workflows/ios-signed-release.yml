@@ -1,0 +1,135 @@
+name: Build Signed IPA (requires Apple Developer account)
+
+# Only run this if you have a paid Apple Developer Program membership.
+# You must add these secrets first (Settings -> Secrets and variables -> Actions):
+#
+#   BUILD_CERTIFICATE_BASE64        base64 of your .p12 signing certificate
+#   P12_PASSWORD                    password you set when exporting the .p12
+#   BUILD_PROVISION_PROFILE_BASE64  base64 of your .mobileprovision file
+#   KEYCHAIN_PASSWORD                any password, just used for the temporary CI keychain
+#   APPLE_TEAM_ID                    your 10-character Team ID (developer.apple.com/account)
+#   PROVISIONING_PROFILE_SPECIFIER   the *name* of the provisioning profile (not the UUID)
+#
+# See ios-signing-README.md in this repo for step-by-step instructions on
+# generating each of these from Xcode / the Apple Developer portal.
+
+on:
+  workflow_dispatch:
+    inputs:
+      export_method:
+        description: 'Export method'
+        required: true
+        default: 'ad-hoc'
+        type: choice
+        options:
+          - development
+          - ad-hoc
+          - app-store
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: Install web deps
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build web app
+        run: pnpm run build
+
+      - name: Add iOS platform
+        run: |
+          rm -rf ios
+          npx cap add ios --packagemanager CocoaPods
+
+      - name: Sync web assets + native plugins
+        run: npx cap sync ios
+
+      - name: Set iOS deployment target
+        run: |
+          sed -i '' "s/platform :ios.*/platform :ios, '14.0'/" ios/App/Podfile
+
+      - name: Install CocoaPods
+        run: |
+          cd ios/App
+          pod install --repo-update
+
+      - name: Import signing certificate & provisioning profile
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERT_PATH=$RUNNER_TEMP/build_certificate.p12
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          security import $CERT_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH login.keychain
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Archive (signed)
+        run: |
+          xcodebuild \
+            -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/App.xcarchive \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
+            PROVISIONING_PROFILE_SPECIFIER="${{ secrets.PROVISIONING_PROFILE_SPECIFIER }}" \
+            archive
+
+      - name: Export IPA
+        run: |
+          cat > exportOptions.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${{ github.event.inputs.export_method }}</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath build/App.xcarchive \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath build/ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacOSWeb-signed-ipa
+          path: build/ipa/*.ipa
